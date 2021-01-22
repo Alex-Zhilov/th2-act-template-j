@@ -313,11 +313,12 @@ public class ActHandler extends ActImplBase {
             MessageMetadata metadata = responseMessage.getMetadata();
             String messageType = metadata.getMessageType();
             CheckMetadata checkMetadata = expectedMessages.get(messageType);
+            TreeTable parametersTable = EventUtils.toTreeTable(responseMessage);
             storeEvent(Event.start()
                             .name(format("Received '%s' response message", messageType))
                             .type("message")
                             .status(checkMetadata.getEventStatus())
-                            .bodyData(com.exactpro.th2.common.event.EventUtils.createMessageBean(convertResponseToEvent(responseMessage)))
+                            .bodyData(parametersTable)
                             .messageID(metadata.getId())
                             .toProtoEvent(parentEventId.getId())
             );
