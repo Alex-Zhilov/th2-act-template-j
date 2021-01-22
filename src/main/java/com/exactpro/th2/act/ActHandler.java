@@ -29,10 +29,7 @@ import static java.util.stream.Collectors.toUnmodifiableMap;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
 import java.util.stream.Collectors;
 
@@ -40,6 +37,7 @@ import com.exactpro.th2.common.event.Event;
 import com.exactpro.th2.common.event.bean.TreeTable;
 import com.exactpro.th2.common.event.bean.builder.MessageBuilder;
 import com.exactpro.th2.common.schema.message.MessageListener;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.util.JsonFormat;
@@ -304,7 +302,7 @@ public class ActHandler extends ActImplBase {
             Message responseMessage,
             Map<String, CheckMetadata> expectedMessages, long timeout) throws JsonProcessingException {
         long startTime = System.currentTimeMillis();
-        String message = format("No response message has been received in '%s' ms", timeout);
+        String message = format("No response message has been received in '%s' ms.\n", timeout) + expectedMessages.toString();
         if (responseMessage == null) {
             createAndStoreErrorEvent(actName,
                     message,
@@ -319,6 +317,7 @@ public class ActHandler extends ActImplBase {
                             .name(format("Received '%s' response message", messageType))
                             .type("message")
                             .status(checkMetadata.getEventStatus())
+                            .bodyData(com.exactpro.th2.common.event.EventUtils.createMessageBean(convertResponseToEvent(responseMessage)))
                             .messageID(metadata.getId())
                             .toProtoEvent(parentEventId.getId())
             );
@@ -441,6 +440,15 @@ public class ActHandler extends ActImplBase {
             fields.put(key, convertedValue);
         });
         return fields;
+    }
+
+    private String convertResponseToEvent(Message message) {
+        try {
+            return new ObjectMapper().writeValueAsString(Collections.singletonList(convertMessage(message)));
+        } catch (JsonProcessingException e) {
+            LOGGER.error("Could not convert Message to json", e);
+            return "";
+        }
     }
 
     private Object convertList(ListValueOrBuilder listValue) {
