@@ -262,7 +262,7 @@ public class ActHandler extends ActImplBase {
                             parentId,
                             messageReceiver.getResponseMessage(),
                             expectedMessages,
-                            timeout, expectedFieldValue);
+                            timeout, expectedFieldValue, checkRule.getMessageIDList());
                 }
             }
         } catch (RuntimeException | InterruptedException e) {
@@ -300,7 +300,7 @@ public class ActHandler extends ActImplBase {
 
     private void createAndStoreNoResponseEvent(String actName, Map<String, CheckMetadata> expectedMessages, String fieldValue,
                                                Instant start,
-                                               EventID parentEventId) throws JsonProcessingException {
+                                               EventID parentEventId, List<MessageID> messageIDList) throws JsonProcessingException {
 
         Event errorEvent = Event.from(start)
                 .endTimestamp()
@@ -308,6 +308,9 @@ public class ActHandler extends ActImplBase {
                 .type("No response found by target keys.")
                 .status(FAILED)
                 .bodyData(createNoResponseBody(expectedMessages, fieldValue));
+        for(MessageID msgID : messageIDList){
+            errorEvent.messageID(msgID);
+        }
         storeEvent(errorEvent.toProtoEvent(parentEventId.getId()));
     }
 
@@ -334,14 +337,14 @@ public class ActHandler extends ActImplBase {
                                         Checkpoint checkpoint,
                                         EventID parentEventId,
                                         Message responseMessage,
-                                        Map<String, CheckMetadata> expectedMessages, long timeout, String expectedValue) throws JsonProcessingException {
+                                        Map<String, CheckMetadata> expectedMessages, long timeout, String expectedValue, List<MessageID> messageIDList) throws JsonProcessingException {
         long startTime = System.currentTimeMillis();
         String message = format("No response message has been received in '%s' ms", timeout);
         if (responseMessage == null) {
             createAndStoreNoResponseEvent(actName, expectedMessages, expectedValue
                     ,
                     Instant.now(),
-                    parentEventId);
+                    parentEventId, messageIDList);
             sendErrorResponse(responseObserver, message);
         } else {
             MessageMetadata metadata = responseMessage.getMetadata();
