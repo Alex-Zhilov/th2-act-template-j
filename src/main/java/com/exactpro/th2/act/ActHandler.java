@@ -15,9 +15,48 @@
  */
 package com.exactpro.th2.act;
 
-import static com.exactpro.th2.common.event.Event.*;
+import com.exactpro.th2.act.grpc.ActGrpc.ActImplBase;
+import com.exactpro.th2.act.grpc.PlaceMessageRequest;
+import com.exactpro.th2.act.grpc.PlaceMessageRequestOrBuilder;
+import com.exactpro.th2.act.grpc.PlaceMessageResponse;
+import com.exactpro.th2.act.grpc.SendMessageResponse;
+import com.exactpro.th2.check1.grpc.Check1Service;
+import com.exactpro.th2.check1.grpc.CheckpointRequest;
+import com.exactpro.th2.check1.grpc.CheckpointResponse;
+import com.exactpro.th2.common.event.Event;
+import com.exactpro.th2.common.event.Event.Status;
+import com.exactpro.th2.common.event.IBodyData;
+import com.exactpro.th2.common.event.bean.TreeTable;
+import com.exactpro.th2.common.event.bean.builder.CollectionBuilder;
+import com.exactpro.th2.common.event.bean.builder.MessageBuilder;
+import com.exactpro.th2.common.event.bean.builder.RowBuilder;
+import com.exactpro.th2.common.event.bean.builder.TreeTableBuilder;
+import com.exactpro.th2.common.grpc.*;
+import com.exactpro.th2.common.schema.message.MessageListener;
+import com.exactpro.th2.common.schema.message.MessageRouter;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.google.common.collect.ImmutableMap;
+import com.google.protobuf.InvalidProtocolBufferException;
+import com.google.protobuf.Timestamp;
+import com.google.protobuf.util.JsonFormat;
+import io.grpc.Context;
+import io.grpc.Deadline;
+import io.grpc.stub.StreamObserver;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
+
 import static com.exactpro.th2.common.event.Event.Status.FAILED;
 import static com.exactpro.th2.common.event.Event.Status.PASSED;
+import static com.exactpro.th2.common.event.Event.start;
 import static com.exactpro.th2.common.grpc.RequestStatus.Status.ERROR;
 import static com.exactpro.th2.common.grpc.RequestStatus.Status.SUCCESS;
 import static com.google.protobuf.TextFormat.shortDebugString;
@@ -26,53 +65,6 @@ import static java.time.Instant.ofEpochMilli;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.stream.Collectors.toUnmodifiableMap;
-
-import java.io.IOException;
-import java.time.Instant;
-import java.util.*;
-import java.util.Map.Entry;
-import java.util.stream.Collectors;
-
-import com.exactpro.th2.common.event.Event;
-import com.exactpro.th2.common.event.bean.TreeTable;
-import com.exactpro.th2.common.event.bean.builder.MessageBuilder;
-import com.exactpro.th2.common.schema.message.MessageListener;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.ImmutableMap;
-import com.google.protobuf.InvalidProtocolBufferException;
-import com.google.protobuf.util.JsonFormat;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.exactpro.th2.act.grpc.ActGrpc.ActImplBase;
-import com.exactpro.th2.act.grpc.PlaceMessageRequest;
-import com.exactpro.th2.act.grpc.PlaceMessageRequestOrBuilder;
-import com.exactpro.th2.act.grpc.PlaceMessageResponse;
-import com.exactpro.th2.act.grpc.SendMessageResponse;
-import com.exactpro.th2.common.event.Event.Status;
-import com.exactpro.th2.common.grpc.Checkpoint;
-import com.exactpro.th2.common.grpc.ConnectionID;
-import com.exactpro.th2.common.grpc.EventBatch;
-import com.exactpro.th2.common.grpc.EventID;
-import com.exactpro.th2.common.grpc.ListValueOrBuilder;
-import com.exactpro.th2.common.grpc.Message;
-import com.exactpro.th2.common.grpc.MessageBatch;
-import com.exactpro.th2.common.grpc.MessageID;
-import com.exactpro.th2.common.grpc.MessageMetadata;
-import com.exactpro.th2.common.grpc.MessageOrBuilder;
-import com.exactpro.th2.common.grpc.RequestStatus;
-import com.exactpro.th2.common.grpc.Value;
-import com.exactpro.th2.common.schema.message.MessageRouter;
-import com.exactpro.th2.check1.grpc.CheckpointRequest;
-import com.exactpro.th2.check1.grpc.CheckpointResponse;
-import com.exactpro.th2.check1.grpc.Check1Service;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.google.protobuf.Timestamp;
-
-import io.grpc.Context;
-import io.grpc.Deadline;
-import io.grpc.stub.StreamObserver;
 
 public class ActHandler extends ActImplBase {
     private static final int DEFAULT_RESPONSE_TIMEOUT = 10_000;
@@ -93,6 +85,21 @@ public class ActHandler extends ActImplBase {
         this.eventBatchMessageRouter = requireNonNull(eventBatchRouter, "'Event batch router' parameter");
         this.verifierConnector = requireNonNull(verifierService, "'Verifier service' parameter");
         this.callbackList = requireNonNull(callbackList, "'Callback list' parameter");
+    }
+
+    private static long getTimeout(Deadline deadline) {
+        return deadline == null ? DEFAULT_RESPONSE_TIMEOUT : deadline.timeRemaining(MILLISECONDS);
+    }
+
+    private static Timestamp getTimestamp(Instant instant) {
+        return Timestamp.newBuilder()
+                .setSeconds(instant.getEpochSecond())
+                .setNanos(instant.getNano())
+                .build();
+    }
+
+    private static String toDebugMessage(com.google.protobuf.MessageOrBuilder messageOrBuilder) throws InvalidProtocolBufferException {
+        return JsonFormat.printer().omittingInsignificantWhitespace().print(messageOrBuilder);
     }
 
     @Override
@@ -194,7 +201,7 @@ public class ActHandler extends ActImplBase {
         try {
             LOGGER.debug("placeQuoteResponseFIX request: {}", request);
             placeMessage(request, responseObserver, "QuoteResponse", request.getMessage().getFieldsMap().get("RFQID").getSimpleValue(),
-                    ImmutableMap.of("ExecutionReport", CheckMetadata.passOn("RFQID"),"QuoteStatusReport", CheckMetadata.passOn("RFQID")), "placeQuoteResponseFIX");
+                    ImmutableMap.of("ExecutionReport", CheckMetadata.passOn("RFQID"), "QuoteStatusReport", CheckMetadata.passOn("RFQID")), "placeQuoteResponseFIX");
         } catch (RuntimeException | JsonProcessingException e) {
             LOGGER.error("Failed to place a QuoteResponse. Message = {}", request.getMessage(), e);
             sendErrorResponse(responseObserver, "Failed to place a QuoteResponse. See the logs.");
@@ -225,7 +232,7 @@ public class ActHandler extends ActImplBase {
     }
 
     private void placeMessage(PlaceMessageRequest request, StreamObserver<PlaceMessageResponse> responseObserver,
-            String expectedRequestType, String expectedFieldValue, Map<String, CheckMetadata> expectedMessages, String actName) throws JsonProcessingException {
+                              String expectedRequestType, String expectedFieldValue, Map<String, CheckMetadata> expectedMessages, String actName) throws JsonProcessingException {
 
         long startPlaceMessage = System.currentTimeMillis();
         ConnectionID requestConnId = request.getConnectionId();
@@ -255,7 +262,7 @@ public class ActHandler extends ActImplBase {
                             parentId,
                             messageReceiver.getResponseMessage(),
                             expectedMessages,
-                            timeout);
+                            timeout, expectedFieldValue);
                 }
             }
         } catch (RuntimeException | InterruptedException e) {
@@ -268,10 +275,6 @@ public class ActHandler extends ActImplBase {
         } finally {
             LOGGER.debug("placeMessage for {} in {} ms", actName, System.currentTimeMillis() - startPlaceMessage);
         }
-    }
-
-    private static long getTimeout(Deadline deadline) {
-        return deadline == null ? DEFAULT_RESPONSE_TIMEOUT : deadline.timeRemaining(MILLISECONDS);
     }
 
     private EventID createAndStoreParentEvent(PlaceMessageRequestOrBuilder request, String actName, Status status) throws JsonProcessingException {
@@ -295,17 +298,48 @@ public class ActHandler extends ActImplBase {
         }
     }
 
+    private void createAndStoreNoResponseEvent(String actName, Map<String, CheckMetadata> expectedMessages, String fieldValue,
+                                               Instant start,
+                                               EventID parentEventId) throws JsonProcessingException {
+
+        Event errorEvent = Event.from(start)
+                .endTimestamp()
+                .name(format("Internal %s error", actName))
+                .type("Error")
+                .status(FAILED)
+                .bodyData(createNoResponseBody(expectedMessages, fieldValue));
+        storeEvent(errorEvent.toProtoEvent(parentEventId.getId()));
+    }
+
+    private IBodyData createNoResponseBody(Map<String, CheckMetadata> expectedMessages, String fieldValue) {
+        TreeTableBuilder treeTableBuilder = new TreeTableBuilder();
+        CollectionBuilder passedOn = new CollectionBuilder();
+        CollectionBuilder failedOn = new CollectionBuilder();
+        for (Map.Entry<String, CheckMetadata> entry : expectedMessages.entrySet()) {
+            if (entry.getValue().eventStatus == PASSED) {
+                passedOn.row(entry.getKey(), new CollectionBuilder().row(entry.getValue().fieldName, new RowBuilder().column(new EventUtils.MessageTableColumn(fieldValue)).build()).build());
+            }
+            if (entry.getValue().eventStatus == FAILED) {
+                failedOn.row(entry.getKey(), new CollectionBuilder().row(entry.getValue().fieldName, new RowBuilder().column(new EventUtils.MessageTableColumn(fieldValue)).build()).build());
+            }
+        }
+        treeTableBuilder.row("PASSED on:", passedOn.build());
+        treeTableBuilder.row("FAILED on:", failedOn.build());
+
+        return treeTableBuilder.build();
+    }
+
     private void processResponseMessage(String actName,
-            StreamObserver<PlaceMessageResponse> responseObserver,
-            Checkpoint checkpoint,
-            EventID parentEventId,
-            Message responseMessage,
-            Map<String, CheckMetadata> expectedMessages, long timeout) throws JsonProcessingException {
+                                        StreamObserver<PlaceMessageResponse> responseObserver,
+                                        Checkpoint checkpoint,
+                                        EventID parentEventId,
+                                        Message responseMessage,
+                                        Map<String, CheckMetadata> expectedMessages, long timeout, String expectedValue) throws JsonProcessingException {
         long startTime = System.currentTimeMillis();
-        String message = format("No response message has been received in '%s' ms.\n", timeout) + expectedMessages.toString();
+        String message = format("No response message has been received in '%s' ms", timeout);
         if (responseMessage == null) {
-            createAndStoreErrorEvent(actName,
-                    message,
+            createAndStoreNoResponseEvent(actName, expectedMessages, expectedValue
+                    ,
                     Instant.now(),
                     parentEventId);
             sendErrorResponse(responseObserver, message);
@@ -315,12 +349,12 @@ public class ActHandler extends ActImplBase {
             CheckMetadata checkMetadata = expectedMessages.get(messageType);
             TreeTable parametersTable = EventUtils.toTreeTable(responseMessage);
             storeEvent(Event.start()
-                            .name(format("Received '%s' response message", messageType))
-                            .type("message")
-                            .status(checkMetadata.getEventStatus())
-                            .bodyData(parametersTable)
-                            .messageID(metadata.getId())
-                            .toProtoEvent(parentEventId.getId())
+                    .name(format("Received '%s' response message", messageType))
+                    .type("message")
+                    .status(checkMetadata.getEventStatus())
+                    .bodyData(parametersTable)
+                    .messageID(metadata.getId())
+                    .toProtoEvent(parentEventId.getId())
             );
             PlaceMessageResponse response = PlaceMessageResponse.newBuilder()
                     .setResponseMessage(responseMessage)
@@ -386,13 +420,6 @@ public class ActHandler extends ActImplBase {
                 .build();
     }
 
-    private static Timestamp getTimestamp(Instant instant) {
-        return Timestamp.newBuilder()
-                .setSeconds(instant.getEpochSecond())
-                .setNanos(instant.getNano())
-                .build();
-    }
-
     private com.exactpro.th2.common.grpc.Event createSendMessageEvent(PlaceMessageRequest request, String parentEventId) throws JsonProcessingException {
         Event event = start()
                 .name("Send '" + request.getMessage().getMetadata().getMessageType() + "' message to connectivity");
@@ -443,15 +470,6 @@ public class ActHandler extends ActImplBase {
         return fields;
     }
 
-    private String convertResponseToEvent(Message message) {
-        try {
-            return new ObjectMapper().writeValueAsString(Collections.singletonList(convertMessage(message)));
-        } catch (JsonProcessingException e) {
-            LOGGER.error("Could not convert Message to json", e);
-            return "";
-        }
-    }
-
     private Object convertList(ListValueOrBuilder listValue) {
         List<Value> valuesList = listValue.getValuesList();
         if (!valuesList.isEmpty()) {
@@ -464,7 +482,7 @@ public class ActHandler extends ActImplBase {
     }
 
     private void sendErrorResponse(StreamObserver<PlaceMessageResponse> responseObserver,
-            String message) {
+                                   String message) {
         responseObserver.onNext(PlaceMessageResponse.newBuilder()
                 .setStatus(RequestStatus.newBuilder()
                         .setStatus(ERROR)
@@ -476,7 +494,7 @@ public class ActHandler extends ActImplBase {
     }
 
     private void sendMessageErrorResponse(StreamObserver<SendMessageResponse> responseObserver,
-            String message) {
+                                          String message) {
         responseObserver.onNext(SendMessageResponse.newBuilder()
                 .setStatus(RequestStatus.newBuilder()
                         .setStatus(ERROR)
@@ -498,10 +516,6 @@ public class ActHandler extends ActImplBase {
         return response.getCheckpoint();
     }
 
-    private static String toDebugMessage(com.google.protobuf.MessageOrBuilder messageOrBuilder) throws InvalidProtocolBufferException {
-        return JsonFormat.printer().omittingInsignificantWhitespace().print(messageOrBuilder);
-    }
-
     private static class CheckMetadata {
         private final Status eventStatus;
         private final RequestStatus.Status requestStatus;
@@ -518,8 +532,17 @@ public class ActHandler extends ActImplBase {
                 case FAILED:
                     requestStatus = ERROR;
                     break;
-                default: throw new IllegalArgumentException("Event status '" + eventStatus + "' can't be convert to request status");
+                default:
+                    throw new IllegalArgumentException("Event status '" + eventStatus + "' can't be convert to request status");
             }
+        }
+
+        public static CheckMetadata passOn(String fieldName) {
+            return new CheckMetadata(fieldName, PASSED);
+        }
+
+        public static CheckMetadata failOn(String fieldName) {
+            return new CheckMetadata(fieldName, FAILED);
         }
 
         public Status getEventStatus() {
@@ -532,14 +555,6 @@ public class ActHandler extends ActImplBase {
 
         public String getFieldName() {
             return fieldName;
-        }
-
-        public static CheckMetadata passOn(String fieldName) {
-            return new CheckMetadata(fieldName, PASSED);
-        }
-
-        public static CheckMetadata failOn(String fieldName) {
-            return new CheckMetadata(fieldName, FAILED);
         }
     }
 }
