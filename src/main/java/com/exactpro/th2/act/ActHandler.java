@@ -305,7 +305,7 @@ public class ActHandler extends ActImplBase {
         Event errorEvent = Event.from(start)
                 .endTimestamp()
                 .name(format("Internal %s error", actName))
-                .type("Error")
+                .type("No response found by target keys.")
                 .status(FAILED)
                 .bodyData(createNoResponseBody(expectedMessages, fieldValue));
         storeEvent(errorEvent.toProtoEvent(parentEventId.getId()));
